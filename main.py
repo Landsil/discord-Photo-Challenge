@@ -12,16 +12,18 @@ from datetime import datetime
 from flask import Flask
 
 # --- Configuration using Environment Variables (Injected by Cloud Run) ---
-# These variables are securely injected from GCP Secret Manager.
 DISCORD_BOT_TOKEN = os.environ.get('DISCORD_BOT_TOKEN')
 DISCORD_CLIENT_ID = os.environ.get('DISCORD_CLIENT_ID')
 DISCORD_THREAD_URL = os.environ.get('DISCORD_THREAD_URL') 
 PORT = int(os.environ.get('PORT', 8080))
 
+# --- Global Bot and Thread State ---
+bot = None
+bot_thread = None
+
 # --- Bot Setup ---
 class PhotoBot(commands.Bot):
     def __init__(self, intents):
-        # We use a placeholder prefix as the bot will rely on slash commands
         super().__init__(command_prefix="!", intents=intents) 
         self.default_thread_url = DISCORD_THREAD_URL
 
@@ -31,49 +33,60 @@ class PhotoBot(commands.Bot):
             try:
                 # Sync commands globally
                 await self.tree.sync()
-                print("Slash commands synced successfully.")
+                print("LOG: Slash commands synced successfully.")
             except Exception as e:
-                print(f"Failed to sync commands: {e}")
+                print(f"ERROR: Failed to sync slash commands. Check bot permissions and application ID. Details: {e}", file=sys.stderr)
 
     async def on_ready(self):
-        print(f'Bot is running. Logged in as {self.user} (ID: {self.user.id})')
-        print(f'Default Thread URL: {self.default_thread_url}')
+        print(f'LOG: Bot is running. Logged in as {self.user} (ID: {self.user.id})')
+        print(f'LOG: Default Thread URL from ENV: {self.default_thread_url}')
         
     async def on_error(self, event_method, *args, **kwargs):
-        print(f'Ignoring exception in {event_method}', file=sys.stderr)
+        # Log Discord internal errors
+        print(f'ERROR: Ignoring exception in Discord event handler: {event_method}', file=sys.stderr)
         
     async def on_command_error(self, context, exception):
         if isinstance(exception, commands.CommandNotFound):
             return
-        print(f"Command Error: {exception}", file=sys.stderr)
+        # Log command-specific errors
+        print(f"ERROR: Command execution failed. Command: {context.command}. Details: {exception}", file=sys.stderr)
 
-# --- Core Logic Functions (Retained from previous versions) ---
-
+# --- Core Logic Functions ---
 def extract_thread_id_from_url(url):
     """Extracts the thread ID from a Discord URL."""
     match = re.search(r'/(\d+)$', url)
-    return int(match.group(1)) if match else None
+    if match:
+        return int(match.group(1))
+    else:
+        print(f"ERROR: Failed to extract thread ID from URL: {url}. Regex did not match.", file=sys.stderr)
+        return None
 
 async def get_thread_messages(thread_id, client):
     """Fetches messages from a specific Discord thread."""
     try:
         thread = client.get_channel(thread_id)
         if not thread:
+            print(f"LOG: Attempting to fetch thread {thread_id} using client.fetch_channel...", file=sys.stderr)
             thread = await client.fetch_channel(thread_id)
         
         if not thread:
-            print(f"Error: Could not find thread with ID {thread_id}.")
+            print(f"ERROR: Could not find thread with ID {thread_id}. Ensure bot is in the server and the ID is correct.", file=sys.stderr)
             return []
 
+        print(f"LOG: Successfully found thread '{thread.name}'. Starting message history fetch.", file=sys.stderr)
         messages = []
         async for message in thread.history(limit=None):
             messages.append(message)
+        print(f"LOG: Successfully fetched {len(messages)} messages.", file=sys.stderr)
         return messages
-    except (discord.errors.Forbidden, discord.errors.NotFound) as e:
-        print(f"Permission/Access Error: {e}")
+    except discord.errors.Forbidden as e:
+        print(f"ERROR: Permission denied to access thread {thread_id}. Check bot's roles/permissions. Details: {e}", file=sys.stderr)
+        return []
+    except discord.errors.NotFound as e:
+        print(f"ERROR: Thread {thread_id} not found on Discord. Details: {e}", file=sys.stderr)
         return []
     except Exception as e:
-        print(f"Unexpected error fetching messages: {e}")
+        print(f"ERROR: Unexpected error fetching messages from thread {thread_id}. Details: {e}", file=sys.stderr)
         return []
 
 def filter_image_posts(messages):
@@ -98,11 +111,15 @@ async def get_post_data(message):
     author_id = message.author.id
 
     for reaction in message.reactions:
-        async for user in reaction.users():
-            if user.id != author_id:
-                total_reactions += 1
-                emoji_str = str(reaction.emoji)
-                individual_reaction_counts[emoji_str] = individual_reaction_counts.get(emoji_str, 0) + 1
+        try:
+            async for user in reaction.users():
+                if user.id != author_id:
+                    total_reactions += 1
+                    emoji_str = str(reaction.emoji)
+                    individual_reaction_counts[emoji_str] = individual_reaction_counts.get(emoji_str, 0) + 1
+        except Exception as e:
+            print(f"WARNING: Failed to fetch users for reaction {reaction.emoji} on message {message.id}. Details: {e}", file=sys.stderr)
+            continue # Continue to the next reaction
 
     individual_reactions = [{"emoji": emoji, "count": count} for emoji, count in individual_reaction_counts.items()]
     sorted_individual_reactions = sorted(individual_reactions, key=lambda x: x["count"], reverse=True)
@@ -122,7 +139,7 @@ def generate_csv(data, filename):
     Saves to /tmp/ which is the only writable path in Cloud Run.
     """
     if not data:
-        print(f"No data to write to {filename}.")
+        print(f"WARNING: No data to write to {filename}. Skipping CSV generation.", file=sys.stderr)
         return None
 
     fieldnames = ["post_link", "image_links", "posted_at", "author", "reactions"]
@@ -139,16 +156,17 @@ def generate_csv(data, filename):
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(csv_data)
-        print(f"Data successfully written to temporary file {filepath}")
+        print(f"LOG: Data successfully written to temporary CSV file: {filepath}")
         return filepath
     except IOError as e:
-        print(f"Error writing to CSV file {filepath}: {e}")
+        print(f"ERROR: Failed to write CSV file to {filepath}. Check /tmp directory permissions (should be fine in GCR). Details: {e}", file=sys.stderr)
         return None
 
 def generate_markdown_output(data, num_top_posts, total_image_posts_count,
                              total_thread_reactions, total_unique_reactors_count,
                              include_image_links):
     """Generates Discord-formatted Markdown for the top posts."""
+    # (Markdown generation logic remains the same for brevity)
     markdown = "__Photo Challenge Report__\n\n"
     markdown += f"- Total photos: `{total_image_posts_count}`\n"
     markdown += f"- Total votes (excluding author's own): `{total_thread_reactions}`\n"
@@ -214,9 +232,12 @@ def generate_markdown_output(data, num_top_posts, total_image_posts_count,
 async def run_photo_challenge(interaction: discord.Interaction, target_url: str):
     """Core logic to fetch data, process, and send results."""
     
+    print(f"LOG: Command received from {interaction.user.name}. Analyzing URL: {target_url}", file=sys.stderr)
+    
     thread_id = extract_thread_id_from_url(target_url)
 
     if not thread_id:
+        print(f"ERROR: Command failed due to invalid thread ID extracted from URL: {target_url}", file=sys.stderr)
         await interaction.followup.send(
             "⚠️ **Invalid URL:** Please provide a full, valid Discord thread URL.",
             ephemeral=True
@@ -226,11 +247,16 @@ async def run_photo_challenge(interaction: discord.Interaction, target_url: str)
     await interaction.followup.send(f"Fetching data from thread ID `{thread_id}`... This may take a moment.")
 
     # 1. Fetch Data
-    # interaction.client refers to the running bot instance
     all_messages = await get_thread_messages(thread_id, interaction.client) 
     
+    if not all_messages:
+        print(f"WARNING: No messages were returned for thread {thread_id}. Terminating analysis.", file=sys.stderr)
+        await interaction.followup.send("⚠️ Could not fetch any messages. Check thread ID and bot permissions.", ephemeral=True)
+        return
+
     # 2. Filter and Process
     image_messages = filter_image_posts(all_messages)
+    print(f"LOG: Found {len(image_messages)} image posts to process.", file=sys.stderr)
     processed_data = [await get_post_data(msg) for msg in image_messages]
     
     # 3. Calculate Summary Metrics
@@ -246,6 +272,8 @@ async def run_photo_challenge(interaction: discord.Interaction, target_url: str)
                     total_thread_reactions += 1
                     unique_reactors_ids.add(user.id)
     total_unique_reactors_count = len(unique_reactors_ids)
+    print(f"LOG: Analysis complete. Total reactions: {total_thread_reactions}, Unique reactors: {total_unique_reactors_count}", file=sys.stderr)
+
 
     # 4. Generate CSV (Save to temporary storage)
     thread_name = interaction.channel.name if isinstance(interaction.channel, (discord.Thread, discord.TextChannel)) else "Unknown_Thread"
@@ -255,13 +283,9 @@ async def run_photo_challenge(interaction: discord.Interaction, target_url: str)
     csv_filepath = generate_csv(processed_data, filename=csv_filename)
     
     # 5. Generate Markdown Outputs
-    
-    # Full Version
     markdown_output_full = generate_markdown_output(
         processed_data, 5, total_image_posts_count, total_thread_reactions, total_unique_reactors_count, True
     )
-
-    # Short Version
     markdown_output_short = generate_markdown_output(
         processed_data, 5, total_image_posts_count, total_thread_reactions, total_unique_reactors_count, False
     )
@@ -271,7 +295,9 @@ async def run_photo_challenge(interaction: discord.Interaction, target_url: str)
     # Send the short version directly to the channel
     try:
         await interaction.channel.send(markdown_output_short)
+        print("LOG: Short report posted to channel.", file=sys.stderr)
     except Exception as e:
+        print(f"ERROR: Failed to post short report to channel {interaction.channel.id}. Details: {e}", file=sys.stderr)
         await interaction.followup.send(f"Error posting results to channel: {e}", ephemeral=True)
         
     # Send CSV file and full report to the user as a DM
@@ -281,15 +307,18 @@ async def run_photo_challenge(interaction: discord.Interaction, target_url: str)
                 "Attached is the full CSV data. Here is the detailed report:",
                 file=discord.File(csv_filepath),
             )
+            print("LOG: CSV file sent via DM.", file=sys.stderr)
         else:
              await interaction.user.send(
                 "Could not generate CSV file due to an error. Here is the detailed report:",
             )
 
         await interaction.user.send(markdown_output_full)
+        print("LOG: Full report sent via DM.", file=sys.stderr)
         await interaction.followup.send("✅ Results successfully posted to the channel and sent to you via DM with the full CSV file.", ephemeral=True)
     except Exception as e:
-        await interaction.followup.send(f"⚠️ Could not send full report or CSV to your DM: {e}. Check bot permissions.", ephemeral=True)
+        print(f"ERROR: Failed to send DM to user {interaction.user.name}. Check if user allows DMs from this guild. Details: {e}", file=sys.stderr)
+        await interaction.followup.send(f"⚠️ Could not send full report or CSV to your DM. Check bot permissions and your privacy settings. Error: {e}", ephemeral=True)
         
 # --- Flask Server and Bot Integration ---
 
@@ -315,10 +344,12 @@ async def run_command(interaction: discord.Interaction, target_url: str = None):
 
     url = target_url or bot.default_thread_url
     if not url:
-         await interaction.followup.send("Error: No thread URL provided. Please use `/photocommand <URL>` or set the `DISCORD_THREAD_URL` environment variable.", ephemeral=True)
+         print("ERROR: Command executed without URL and DISCORD_THREAD_URL environment variable is missing.", file=sys.stderr)
+         await interaction.followup.send("Error: No thread URL provided. Please use `/photocommand <URL>` or ensure the `DISCORD_THREAD_URL` environment variable is set in Cloud Run.", ephemeral=True)
          return
 
     if not interaction.guild:
+        print("WARNING: Command executed outside of a guild context (DM?). Ignoring.", file=sys.stderr)
         await interaction.followup.send("This command must be run inside a Discord server channel.", ephemeral=True)
         return
 
@@ -348,12 +379,14 @@ async def help_command(interaction: discord.Interaction):
     """
     try:
         await interaction.user.send(help_markdown)
+        print(f"LOG: Sent help DM to user {interaction.user.name}.", file=sys.stderr)
         await interaction.followup.send("✅ Help guide sent to your Direct Messages.", ephemeral=True)
     except discord.Forbidden:
+        print(f"WARNING: Failed to send help DM to {interaction.user.name}. User likely disabled DMs.", file=sys.stderr)
         await interaction.followup.send("⚠️ I cannot send you a DM. Please check your privacy settings or enable DMs from this guild.", ephemeral=True)
     except Exception as e:
-        print(f"Error sending help DM: {e}")
-        await interaction.followup.send("⚠️ An error occurred while sending the DM.", ephemeral=True)
+        print(f"ERROR: Unexpected error sending help DM to {interaction.user.name}. Details: {e}", file=sys.stderr)
+        await interaction.followup.send("⚠️ An unexpected error occurred while sending the DM.", ephemeral=True)
 
 
 # --- Flask Routes ---
@@ -363,38 +396,44 @@ def health_check():
     HTTP route for the Cloud Run health check. 
     Responds 200 OK to keep the container running.
     """
-    return "Bot is running.", 200
+    if bot_thread and bot_thread.is_alive():
+        return "Bot is running.", 200
+    else:
+        # Log a warning if the bot thread is down but the web server is still running.
+        print("WARNING: Web server running, but Discord Bot thread is detected as DOWN.", file=sys.stderr)
+        return "Web server running. Bot thread status: DOWN.", 200
 
-# --- Execution ---
 
-def run_bot():
+# --- Bot Thread Management ---
+
+def run_bot_in_thread():
     """Starts the Discord bot client."""
     if not DISCORD_BOT_TOKEN:
-        print("FATAL ERROR: DISCORD_BOT_TOKEN environment variable is not set.", file=sys.stderr)
-        sys.exit(1)
+        # This should ideally be caught by Gunicorn/Cloud Run config check but acts as a fallback.
+        print("CRITICAL ERROR: DISCORD_BOT_TOKEN environment variable is not set. Bot cannot connect.", file=sys.stderr)
+        return 
         
     try:
-        # This runs the bot on its own thread, managing the Discord WebSocket connection
+        print("LOG: Attempting to connect Discord bot...", file=sys.stderr)
+        # Blocking call that runs the bot
         bot.run(DISCORD_BOT_TOKEN)
     except discord.errors.LoginFailure:
-        print("Login Failure: Check DISCORD_BOT_TOKEN environment variable.", file=sys.stderr)
-        sys.exit(1)
+        print("CRITICAL ERROR: Discord Login Failure. Check DISCORD_BOT_TOKEN value in Secret Manager.", file=sys.stderr)
     except Exception as e:
-        print(f"An unexpected error occurred in the bot thread: {e}", file=sys.stderr)
-        sys.exit(1)
+        # Log any non-login-related crashes in the thread
+        print(f"CRITICAL ERROR: An unexpected, unhandled error occurred in the bot thread: {e}", file=sys.stderr)
 
-if __name__ == '__main__':
-    print("Starting hybrid application...")
-    
-    # 1. Start the Discord bot in a separate thread
-    bot_thread = threading.Thread(target=run_bot)
+
+def start_bot_thread():
+    """Initializes and starts the Discord bot thread."""
+    global bot_thread
+    print("LOG: Initializing Discord Bot thread start procedure.", file=sys.stderr)
+    # Ensure the thread is created with daemon=True
+    bot_thread = threading.Thread(target=run_bot_in_thread, daemon=True)
     bot_thread.start()
-    print("Discord Bot thread started.")
-    
-    # 2. Start the Flask web server (required for Cloud Run health checks)
-    # Gunicorn, configured in the Dockerfile, will invoke 'app' and handle this.
-    # The container will stay alive as long as this Flask app is responsive.
-    print(f"Starting Flask server on port {PORT}...")
-    # Using 'gunicorn' command is safer for Cloud Run; this direct app.run is mainly for local dev.
-    # The Gunicorn command in the Dockerfile is the primary entrypoint.
-    # app.run(host="0.0.0.0", port=PORT, debug=False) # Uncomment for local testing
+    print("LOG: Discord Bot thread successfully started in the background.", file=sys.stderr)
+
+
+# --- Gunicorn/Flask Initialization Hook ---
+# Gunicorn executes this module-level code when the worker process starts.
+start_bot_thread()
