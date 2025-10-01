@@ -5,7 +5,7 @@ import os
 import csv
 import re
 import sys
-# Removed: import threading # Used to run the bot and the web server simultaneously
+# Removed: import threading
 import asyncio # New import for managing the async bot task
 from datetime import datetime
 
@@ -20,7 +20,6 @@ PORT = int(os.environ.get('PORT', 8080))
 
 # --- Global Bot State ---
 bot = None
-# Removed: bot_thread = None
 
 # --- Bot Setup ---
 class PhotoBot(commands.Bot):
@@ -56,7 +55,7 @@ class PhotoBot(commands.Bot):
         # Log command-specific errors
         print(f"ERROR: Command execution failed. Command: {context.command}. Details: {exception}", file=sys.stderr)
 
-# --- Core Logic Functions (No changes needed here) ---
+# --- Core Logic Functions (Retained from previous version) ---
 
 def extract_thread_id_from_url(url):
     """Extracts the thread ID from a Discord URL."""
@@ -81,7 +80,6 @@ async def get_thread_messages(thread_id, client):
 
         print(f"LOG: Successfully found thread '{thread.name}'. Starting message history fetch.", file=sys.stderr)
         messages = []
-        # Changed limit=None to limit=1000 to prevent potential memory issues/timeouts on huge threads, though limit=None works by default.
         async for message in thread.history(limit=1000): 
             messages.append(message)
         print(f"LOG: Successfully fetched {len(messages)} messages.", file=sys.stderr)
@@ -119,8 +117,6 @@ async def get_post_data(message):
 
     for reaction in message.reactions:
         try:
-            # Note: Fetching reaction users is an expensive and potentially rate-limited operation.
-            # It's kept here as per original logic, but be mindful of Discord's API limits.
             async for user in reaction.users():
                 if user.id != author_id:
                     total_reactions += 1
@@ -236,7 +232,7 @@ def generate_markdown_output(data, num_top_posts, total_image_posts_count,
         
     return markdown + "\n".join(output_lines)
 
-# --- Discord Command Implementation (No changes needed here) ---
+# --- Discord Command Implementation (Retained from previous version) ---
 
 async def run_photo_challenge(interaction: discord.Interaction, target_url: str):
     """Core logic to fetch data, process, and send results."""
