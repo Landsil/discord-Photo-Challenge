@@ -5,7 +5,8 @@ import os
 import csv
 import re
 import sys
-import threading # Used to run the bot and the web server simultaneously
+# Removed: import threading # Used to run the bot and the web server simultaneously
+import asyncio # New import for managing the async bot task
 from datetime import datetime
 
 # Import Flask for the required HTTP health check listener
@@ -17,23 +18,27 @@ DISCORD_CLIENT_ID = os.environ.get('DISCORD_CLIENT_ID')
 DISCORD_THREAD_URL = os.environ.get('DISCORD_THREAD_URL') 
 PORT = int(os.environ.get('PORT', 8080))
 
-# --- Global Bot and Thread State ---
+# --- Global Bot State ---
 bot = None
-bot_thread = None
+# Removed: bot_thread = None
 
 # --- Bot Setup ---
 class PhotoBot(commands.Bot):
     def __init__(self, intents):
+        # command_prefix is not strictly needed for slash commands but required by commands.Bot
         super().__init__(command_prefix="!", intents=intents) 
         self.default_thread_url = DISCORD_THREAD_URL
+        # Flag to ensure we don't try to sync commands multiple times on reconnection
+        self._synced = False 
 
     async def setup_hook(self):
         # Sync the application commands (slash commands) with Discord
-        if DISCORD_CLIENT_ID:
+        if DISCORD_CLIENT_ID and not self._synced:
             try:
                 # Sync commands globally
                 await self.tree.sync()
                 print("LOG: Slash commands synced successfully.")
+                self._synced = True
             except Exception as e:
                 print(f"ERROR: Failed to sync slash commands. Check bot permissions and application ID. Details: {e}", file=sys.stderr)
 
@@ -51,7 +56,8 @@ class PhotoBot(commands.Bot):
         # Log command-specific errors
         print(f"ERROR: Command execution failed. Command: {context.command}. Details: {exception}", file=sys.stderr)
 
-# --- Core Logic Functions ---
+# --- Core Logic Functions (No changes needed here) ---
+
 def extract_thread_id_from_url(url):
     """Extracts the thread ID from a Discord URL."""
     match = re.search(r'/(\d+)$', url)
@@ -75,7 +81,8 @@ async def get_thread_messages(thread_id, client):
 
         print(f"LOG: Successfully found thread '{thread.name}'. Starting message history fetch.", file=sys.stderr)
         messages = []
-        async for message in thread.history(limit=None):
+        # Changed limit=None to limit=1000 to prevent potential memory issues/timeouts on huge threads, though limit=None works by default.
+        async for message in thread.history(limit=1000): 
             messages.append(message)
         print(f"LOG: Successfully fetched {len(messages)} messages.", file=sys.stderr)
         return messages
@@ -112,6 +119,8 @@ async def get_post_data(message):
 
     for reaction in message.reactions:
         try:
+            # Note: Fetching reaction users is an expensive and potentially rate-limited operation.
+            # It's kept here as per original logic, but be mindful of Discord's API limits.
             async for user in reaction.users():
                 if user.id != author_id:
                     total_reactions += 1
@@ -227,7 +236,7 @@ def generate_markdown_output(data, num_top_posts, total_image_posts_count,
         
     return markdown + "\n".join(output_lines)
 
-# --- Discord Command Implementation ---
+# --- Discord Command Implementation (No changes needed here) ---
 
 async def run_photo_challenge(interaction: discord.Interaction, target_url: str):
     """Core logic to fetch data, process, and send results."""
@@ -389,6 +398,32 @@ async def help_command(interaction: discord.Interaction):
         await interaction.followup.send("⚠️ An unexpected error occurred while sending the DM.", ephemeral=True)
 
 
+# --- Bot Async Loop Management ---
+def start_bot_in_background():
+    """
+    Starts the Discord bot client as an asynchronous task.
+    This runs in the same gevent-patched asyncio event loop as the Gunicorn worker.
+    """
+    if not DISCORD_BOT_TOKEN:
+        print("CRITICAL ERROR: DISCORD_BOT_TOKEN environment variable is not set. Bot cannot connect.", file=sys.stderr)
+        return 
+        
+    try:
+        print("LOG: Attempting to connect Discord bot as a non-blocking async task...", file=sys.stderr)
+        
+        # Get the running event loop (provided by gevent/Gunicorn)
+        loop = asyncio.get_event_loop() 
+        
+        # Use bot.start() instead of bot.run() for non-blocking start in an existing loop
+        loop.create_task(bot.start(DISCORD_BOT_TOKEN))
+        print("LOG: Discord Bot async task successfully scheduled in the background.", file=sys.stderr)
+
+    except discord.errors.LoginFailure:
+        print("CRITICAL ERROR: Discord Login Failure. Check DISCORD_BOT_TOKEN value in Secret Manager.", file=sys.stderr)
+    except Exception as e:
+        # Log any non-login-related crashes
+        print(f"CRITICAL ERROR: An unexpected, unhandled error occurred during bot start: {e}", file=sys.stderr)
+
 # --- Flask Routes ---
 @app.route('/', methods=['GET'])
 def health_check():
@@ -396,44 +431,17 @@ def health_check():
     HTTP route for the Cloud Run health check. 
     Responds 200 OK to keep the container running.
     """
-    if bot_thread and bot_thread.is_alive():
-        return "Bot is running.", 200
+    # Check if the bot is ready. This is a simple indicator that the async loop is running.
+    if bot and bot.is_ready():
+        return "Bot is running and ready.", 200
     else:
-        # Log a warning if the bot thread is down but the web server is still running.
-        print("WARNING: Web server running, but Discord Bot thread is detected as DOWN.", file=sys.stderr)
-        return "Web server running. Bot thread status: DOWN.", 200
-
-
-# --- Bot Thread Management ---
-
-def run_bot_in_thread():
-    """Starts the Discord bot client."""
-    if not DISCORD_BOT_TOKEN:
-        # This should ideally be caught by Gunicorn/Cloud Run config check but acts as a fallback.
-        print("CRITICAL ERROR: DISCORD_BOT_TOKEN environment variable is not set. Bot cannot connect.", file=sys.stderr)
-        return 
-        
-    try:
-        print("LOG: Attempting to connect Discord bot...", file=sys.stderr)
-        # Blocking call that runs the bot
-        bot.run(DISCORD_BOT_TOKEN)
-    except discord.errors.LoginFailure:
-        print("CRITICAL ERROR: Discord Login Failure. Check DISCORD_BOT_TOKEN value in Secret Manager.", file=sys.stderr)
-    except Exception as e:
-        # Log any non-login-related crashes in the thread
-        print(f"CRITICAL ERROR: An unexpected, unhandled error occurred in the bot thread: {e}", file=sys.stderr)
-
-
-def start_bot_thread():
-    """Initializes and starts the Discord bot thread."""
-    global bot_thread
-    print("LOG: Initializing Discord Bot thread start procedure.", file=sys.stderr)
-    # Ensure the thread is created with daemon=True
-    bot_thread = threading.Thread(target=run_bot_in_thread, daemon=True)
-    bot_thread.start()
-    print("LOG: Discord Bot thread successfully started in the background.", file=sys.stderr)
+        # Log a warning if the bot is not yet ready (initial startup)
+        status = "STARTING" if bot else "DOWN"
+        print(f"WARNING: Web server running, but Discord Bot status: {status}.", file=sys.stderr)
+        return f"Web server running. Bot status: {status}.", 200
 
 
 # --- Gunicorn/Flask Initialization Hook ---
 # Gunicorn executes this module-level code when the worker process starts.
-start_bot_thread()
+# We call the start function here to kick off the async bot alongside the Flask app.
+start_bot_in_background()
