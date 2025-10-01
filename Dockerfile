@@ -11,7 +11,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the rest of the application code
 COPY . .
 
-# Cloud Run injects the PORT environment variable; 
-# we don't need to listen on it, but the container must run indefinitely.
-# We just use the standard Python Discord bot execution.
-CMD ["python", "main.py"]
+# Run the Flask app using Gunicorn, binding to the port provided by the environment variable ($PORT)
+# Gunicorn will start the Flask 'app' defined in 'main.py', which starts the Discord bot in a thread.
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "main:app"]
