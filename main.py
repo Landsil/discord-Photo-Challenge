@@ -5,29 +5,31 @@ import os
 import csv
 import re
 import sys
+import threading # Used to run the bot and the web server simultaneously
 from datetime import datetime
 
+# Import Flask for the required HTTP health check listener
+from flask import Flask
+
 # --- Configuration using Environment Variables (Injected by Cloud Run) ---
-# These variables must be set in the Cloud Run service configuration,
-# typically linked to GCP Secret Manager.
+# These variables are securely injected from GCP Secret Manager.
 DISCORD_BOT_TOKEN = os.environ.get('DISCORD_BOT_TOKEN')
 DISCORD_CLIENT_ID = os.environ.get('DISCORD_CLIENT_ID')
 DISCORD_THREAD_URL = os.environ.get('DISCORD_THREAD_URL') 
-# The port Cloud Run expects the server to run on (though Discord bots don't use HTTP, 
-# this ensures the container stays running)
-PORT = os.environ.get('PORT', 8080) 
+PORT = int(os.environ.get('PORT', 8080))
 
 # --- Bot Setup ---
 class PhotoBot(commands.Bot):
-    def __init__(self, command_prefix, intents):
-        super().__init__(command_prefix=command_prefix, intents=intents)
+    def __init__(self, intents):
+        # We use a placeholder prefix as the bot will rely on slash commands
+        super().__init__(command_prefix="!", intents=intents) 
         self.default_thread_url = DISCORD_THREAD_URL
 
     async def setup_hook(self):
         # Sync the application commands (slash commands) with Discord
         if DISCORD_CLIENT_ID:
             try:
-                # Assuming the bot uses Application Command Permissions, sync globally
+                # Sync commands globally
                 await self.tree.sync()
                 print("Slash commands synced successfully.")
             except Exception as e:
@@ -38,7 +40,6 @@ class PhotoBot(commands.Bot):
         print(f'Default Thread URL: {self.default_thread_url}')
         
     async def on_error(self, event_method, *args, **kwargs):
-        # Log all unhandled errors
         print(f'Ignoring exception in {event_method}', file=sys.stderr)
         
     async def on_command_error(self, context, exception):
@@ -46,7 +47,7 @@ class PhotoBot(commands.Bot):
             return
         print(f"Command Error: {exception}", file=sys.stderr)
 
-# --- Core Logic Functions (Adapted from Colab version) ---
+# --- Core Logic Functions (Retained from previous versions) ---
 
 def extract_thread_id_from_url(url):
     """Extracts the thread ID from a Discord URL."""
@@ -58,7 +59,6 @@ async def get_thread_messages(thread_id, client):
     try:
         thread = client.get_channel(thread_id)
         if not thread:
-            # Try fetching from cache first, then use client.fetch_channel
             thread = await client.fetch_channel(thread_id)
         
         if not thread:
@@ -117,10 +117,13 @@ async def get_post_data(message):
     }
 
 def generate_csv(data, filename):
-    """Generates a CSV file from the extracted post data."""
+    """
+    Generates a CSV file from the extracted post data.
+    Saves to /tmp/ which is the only writable path in Cloud Run.
+    """
     if not data:
         print(f"No data to write to {filename}.")
-        return
+        return None
 
     fieldnames = ["post_link", "image_links", "posted_at", "author", "reactions"]
     csv_data = []
@@ -130,8 +133,8 @@ def generate_csv(data, filename):
         csv_data.append(temp_item)
 
     try:
-        # Cloud Run runs on Linux, use a path it can write to, like /tmp
-        filepath = f"/tmp/{filename}"
+        # Use /tmp for writable storage in Cloud Run
+        filepath = f"/tmp/{filename}" 
         with open(filepath, 'w', newline='', encoding='utf-8') as csvfile:
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             writer.writeheader()
@@ -157,8 +160,6 @@ def generate_markdown_output(data, num_top_posts, total_image_posts_count,
         return markdown
 
     sorted_data = sorted(data, key=lambda x: x["reactions"], reverse=True)
-
-    # Group posts by reactions
     grouped_posts = {}
     for post in sorted_data:
         reactions = post['reactions']
@@ -179,7 +180,10 @@ def generate_markdown_output(data, num_top_posts, total_image_posts_count,
         
         # Start a new rank entry
         group_lines = []
-        group_lines.append(f"**{current_rank}.** (Votes: `{reactions}`)")
+        
+        # Conditionally include reactions for the rank spot only in the full version
+        rank_reactions_info = f" (Votes: `{reactions}`)" if include_image_links else ""
+        group_lines.append(f"**{current_rank}.**{rank_reactions_info}")
         
         for post in posts_in_group:
             # Post link and author
@@ -222,7 +226,8 @@ async def run_photo_challenge(interaction: discord.Interaction, target_url: str)
     await interaction.followup.send(f"Fetching data from thread ID `{thread_id}`... This may take a moment.")
 
     # 1. Fetch Data
-    all_messages = await get_thread_messages(thread_id, interaction.client)
+    # interaction.client refers to the running bot instance
+    all_messages = await get_thread_messages(thread_id, interaction.client) 
     
     # 2. Filter and Process
     image_messages = filter_image_posts(all_messages)
@@ -267,7 +272,7 @@ async def run_photo_challenge(interaction: discord.Interaction, target_url: str)
     try:
         await interaction.channel.send(markdown_output_short)
     except Exception as e:
-        await interaction.followup.send(f"Error posting results: {e}", ephemeral=True)
+        await interaction.followup.send(f"Error posting results to channel: {e}", ephemeral=True)
         
     # Send CSV file and full report to the user as a DM
     try:
@@ -276,85 +281,120 @@ async def run_photo_challenge(interaction: discord.Interaction, target_url: str)
                 "Attached is the full CSV data. Here is the detailed report:",
                 file=discord.File(csv_filepath),
             )
+        else:
+             await interaction.user.send(
+                "Could not generate CSV file due to an error. Here is the detailed report:",
+            )
+
         await interaction.user.send(markdown_output_full)
         await interaction.followup.send("✅ Results successfully posted to the channel and sent to you via DM with the full CSV file.", ephemeral=True)
     except Exception as e:
         await interaction.followup.send(f"⚠️ Could not send full report or CSV to your DM: {e}. Check bot permissions.", ephemeral=True)
+        
+# --- Flask Server and Bot Integration ---
 
+app = Flask(__name__)
 
-# --- Bot Initialization and Command Registration ---
-
-# Intents required to read messages, reactions, and access thread content
+# Intents required for messages, reactions, and thread content
 intents = discord.Intents.default()
 intents.message_content = True
 intents.reactions = True
-intents.members = True # Required for more reliable user/author lookups
+intents.members = True 
 
-if DISCORD_CLIENT_ID:
-    # commands.Bot automatically handles prefix commands, but we mostly use slash commands
-    bot = PhotoBot(command_prefix="!", intents=intents)
+# Initialize the Bot instance
+bot = PhotoBot(intents=intents)
 
-    # Global Slash Command: /photocommand run
-    @bot.tree.command(name="photocommand", description="Runs the photo challenge counter and generates reports.")
-    @app_commands.describe(
-        target_url="The full URL of the Discord thread to analyze. Overrides default."
-    )
-    async def run_command(interaction: discord.Interaction, target_url: str = None):
-        """Slash command handler."""
-        # Defer the response as data fetching can take time
-        await interaction.response.defer(thinking=True) 
+# Register the slash command functions with the bot's command tree
+@bot.tree.command(name="photocommand", description="Runs the photo challenge counter and generates reports.")
+@app_commands.describe(
+    target_url="The full URL of the Discord thread to analyze. Overrides default."
+)
+async def run_command(interaction: discord.Interaction, target_url: str = None):
+    """Slash command handler."""
+    await interaction.response.defer(thinking=True, ephemeral=True) 
 
-        url = target_url or bot.default_thread_url
-        if not url:
-             await interaction.followup.send("Error: No thread URL provided. Please use `/photocommand <URL>` or set the `DISCORD_THREAD_URL` environment variable.", ephemeral=True)
-             return
+    url = target_url or bot.default_thread_url
+    if not url:
+         await interaction.followup.send("Error: No thread URL provided. Please use `/photocommand <URL>` or set the `DISCORD_THREAD_URL` environment variable.", ephemeral=True)
+         return
 
-        await run_photo_challenge(interaction, url)
+    if not interaction.guild:
+        await interaction.followup.send("This command must be run inside a Discord server channel.", ephemeral=True)
+        return
+
+    await run_photo_challenge(interaction, url)
 
 
-    # Global Slash Command: /photocommand help
-    @bot.tree.command(name="photocommandhelp", description="Displays basic info and commands.")
-    async def help_command(interaction: discord.Interaction):
-        """Help command handler that sends a DM to the user."""
+@bot.tree.command(name="photocommandhelp", description="Displays basic info and commands.")
+async def help_command(interaction: discord.Interaction):
+    """Help command handler that sends a DM to the user."""
+    await interaction.response.defer(thinking=True, ephemeral=True) 
+
+    help_markdown = f"""
+    **🤖 Photo Challenge Counter Bot Help**
+    
+    This bot analyzes a Discord thread, identifies image posts, and counts reactions (excluding self-reactions) to determine the top submissions.
+    
+    **Available Commands:**
+    1. `/photocommandhelp`: Displays this help message (DM).
+    2. `/photocommand run [target_url]`: Runs the analysis on a specified thread.
+       - `target_url` (optional): The full URL of the Discord thread you want to analyze. If omitted, the bot uses the default URL configured in its settings.
+    
+    **Output:**
+    - A summarized report is posted directly to the channel.
+    - The full detailed report (with image links) and a CSV file are sent to your Direct Messages (DM).
+    
+    *Note: The bot must have read access to the channel and the thread to function.*
+    """
+    try:
+        await interaction.user.send(help_markdown)
+        await interaction.followup.send("✅ Help guide sent to your Direct Messages.", ephemeral=True)
+    except discord.Forbidden:
+        await interaction.followup.send("⚠️ I cannot send you a DM. Please check your privacy settings or enable DMs from this guild.", ephemeral=True)
+    except Exception as e:
+        print(f"Error sending help DM: {e}")
+        await interaction.followup.send("⚠️ An error occurred while sending the DM.", ephemeral=True)
+
+
+# --- Flask Routes ---
+@app.route('/', methods=['GET'])
+def health_check():
+    """
+    HTTP route for the Cloud Run health check. 
+    Responds 200 OK to keep the container running.
+    """
+    return "Bot is running.", 200
+
+# --- Execution ---
+
+def run_bot():
+    """Starts the Discord bot client."""
+    if not DISCORD_BOT_TOKEN:
+        print("FATAL ERROR: DISCORD_BOT_TOKEN environment variable is not set.", file=sys.stderr)
+        sys.exit(1)
         
-        help_markdown = f"""
-        **🤖 Photo Challenge Counter Bot Help**
-        
-        This bot analyzes a Discord thread, identifies image posts, and counts reactions (excluding self-reactions) to determine the top submissions.
-        
-        **Available Commands:**
-        1. `/photocommandhelp`: Displays this help message (DM).
-        2. `/photocommand run [target_url]`: Runs the analysis on a specified thread.
-           - `target_url` (optional): The full URL of the Discord thread you want to analyze. If omitted, the bot uses the default URL configured in its settings.
-        
-        **Output:**
-        - A summarized report is posted directly to the channel.
-        - The full detailed report (with image links) and a CSV file are sent to your Direct Messages (DM).
-        
-        *Note: The bot must have read access to the channel and the thread to function.*
-        """
-        try:
-            await interaction.user.send(help_markdown)
-            await interaction.response.send_message("✅ Help guide sent to your Direct Messages.", ephemeral=True)
-        except discord.Forbidden:
-            await interaction.response.send_message("⚠️ I cannot send you a DM. Please check your privacy settings or enable DMs from this guild.", ephemeral=True)
-        except Exception as e:
-            print(f"Error sending help DM: {e}")
-            await interaction.response.send_message("⚠️ An error occurred while sending the DM.", ephemeral=True)
+    try:
+        # This runs the bot on its own thread, managing the Discord WebSocket connection
+        bot.run(DISCORD_BOT_TOKEN)
+    except discord.errors.LoginFailure:
+        print("Login Failure: Check DISCORD_BOT_TOKEN environment variable.", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"An unexpected error occurred in the bot thread: {e}", file=sys.stderr)
+        sys.exit(1)
 
-
-    # --- Main Execution ---
-    if __name__ == '__main__':
-        if not DISCORD_BOT_TOKEN:
-            print("FATAL ERROR: DISCORD_BOT_TOKEN environment variable is not set.", file=sys.stderr)
-            sys.exit(1)
-            
-        try:
-            # Running the bot indefinitely on the main thread. 
-            # Cloud Run will manage the lifecycle.
-            bot.run(DISCORD_BOT_TOKEN)
-        except discord.errors.LoginFailure:
-            print("Login Failure: Check DISCORD_BOT_TOKEN.", file=sys.stderr)
-        except Exception as e:
-            print(f"An error occurred: {e}", file=sys.stderr)
-            sys.exit(1)
+if __name__ == '__main__':
+    print("Starting hybrid application...")
+    
+    # 1. Start the Discord bot in a separate thread
+    bot_thread = threading.Thread(target=run_bot)
+    bot_thread.start()
+    print("Discord Bot thread started.")
+    
+    # 2. Start the Flask web server (required for Cloud Run health checks)
+    # Gunicorn, configured in the Dockerfile, will invoke 'app' and handle this.
+    # The container will stay alive as long as this Flask app is responsive.
+    print(f"Starting Flask server on port {PORT}...")
+    # Using 'gunicorn' command is safer for Cloud Run; this direct app.run is mainly for local dev.
+    # The Gunicorn command in the Dockerfile is the primary entrypoint.
+    # app.run(host="0.0.0.0", port=PORT, debug=False) # Uncomment for local testing
