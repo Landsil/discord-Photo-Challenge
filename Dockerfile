@@ -1,16 +1,14 @@
-# Use a slim Python base image
-FROM python:3.12-slim
+FROM python:3.12-slim-buster
 
-# Set the working directory in the container
 WORKDIR /app
 
-# Copy requirement files and install dependencies
+# Install dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of the application code
-COPY . .
+# Copy source code
+COPY main.py .
 
-# Run the Flask app using Gunicorn, binding to the port provided by the environment variable ($PORT)
-# Gunicorn will start the Flask 'app' defined in 'main.py', which starts the Discord bot in a thread.
-CMD ["gunicorn", "--bind", "0.0.0.0:8080", "main:app"]
+# Command to run the application using Gunicorn's gevent worker.
+# This single process will now handle both the web server (Flask) and the Discord bot (async loop).
+CMD sh -c "gunicorn -w 1 -k gevent --timeout 300 --bind 0.0.0.0:${PORT} main:app"
