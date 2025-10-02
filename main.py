@@ -10,7 +10,7 @@ from datetime import datetime
 
 # Import Flask for the required HTTP health check listener
 from flask import Flask
-from asgiref.wsgi import WsgiToAsgi
+import threading
 
 # --- Configuration using Environment Variables (Injected by Cloud Run) ---
 DISCORD_BOT_TOKEN = os.environ.get('DISCORD_BOT_TOKEN')
@@ -324,8 +324,6 @@ async def run_photo_challenge(interaction: discord.Interaction, target_url: str)
 # --- Flask Server and Bot Integration ---
 
 app = Flask(__name__)
-# THIS IS THE NEW LINE
-app.wsgi_app = WsgiToAsgi(app.wsgi_app)
 
 # Intents required for messages, reactions, and thread content
 intents = discord.Intents.default()
@@ -399,16 +397,16 @@ def health_check():
     HTTP route for the Cloud Run health check.
     Responds 200 OK to keep the container running.
     """
-    if bot_task and not bot_task.done():
+    if bot_thread and bot_thread.is_alive():
         if bot and bot.is_ready():
             return "Bot is running and ready.", 200
         else:
-            # Bot task is running but not fully connected/ready yet. This is a valid state during startup.
-            return "Bot task is running but not ready.", 200
+            # Bot thread is running but not fully connected/ready yet. This is a valid state during startup.
+            return "Bot thread is running but not ready.", 200
     else:
-        # If the bot task is down, the service is unhealthy.
-        print("WARNING: Web server running, but Discord Bot task is detected as DOWN.", file=sys.stderr, flush=True)
-        return "Web server running. Bot task status: DOWN.", 503 # Service Unavailable
+        # If the bot thread is down, the service is unhealthy.
+        print("WARNING: Web server running, but Discord Bot thread is detected as DOWN.", file=sys.stderr, flush=True)
+        return "Web server running. Bot thread status: DOWN.", 503 # Service Unavailable
 
 
 # --- Asynchronous Bot Management ---
@@ -433,15 +431,27 @@ async def run_bot_async():
         print(f"CRITICAL ERROR: An unexpected, unhandled error occurred in the bot task: {e}", file=sys.stderr, flush=True)
 
 
-@app.before_serving
-async def startup():
-    """
-    This function is called by the ASGI server (Uvicorn) before it starts
-    serving requests. It's the perfect place to start our background bot task.
-    """
+def run_bot_in_thread():
+    """Run the Discord bot in a separate thread with its own event loop."""
     global bot_task
-    print("LOG: ASGI server is starting up. Creating bot task.", file=sys.stderr, flush=True)
-    loop = asyncio.get_event_loop()
-    bot_task = loop.create_task(run_bot_async())
+    try:
+        print("LOG: Starting Discord bot in background thread...", file=sys.stderr, flush=True)
+        # Create a new event loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        # Run the bot
+        token = os.environ.get('DISCORD_BOT_TOKEN')
+        if not token:
+            print("CRITICAL ERROR: DISCORD_BOT_TOKEN environment variable is not set. Bot cannot connect.", file=sys.stderr, flush=True)
+            return
+            
+        print("LOG: Attempting to start Discord bot...", file=sys.stderr, flush=True)
+        loop.run_until_complete(bot.start(token))
+    except Exception as e:
+        print(f"CRITICAL ERROR: Discord bot thread failed: {e}", file=sys.stderr, flush=True)
 
-
+# Start the Discord bot in a background thread when the module loads
+bot_thread = threading.Thread(target=run_bot_in_thread, daemon=True)
+bot_thread.start()
+print("LOG: Discord bot thread started.", file=sys.stderr, flush=True)
