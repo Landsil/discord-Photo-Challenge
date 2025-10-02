@@ -1,15 +1,16 @@
+# Use a specific, stable version of the Python slim image
 FROM python:3.12-slim
 
+# Set the working directory in the container
 WORKDIR /app
 
-# Install dependencies
+# Copy the requirements file and install dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy source code and the new Gunicorn config
-COPY main.py .
-COPY gunicorn.conf.py .
+# Copy the rest of the application source code
+COPY . .
 
-# Command to run the application using our Gunicorn config file.
-# The config file handles binding, workers, and starting the bot.
-CMD ["gunicorn", "-c", "gunicorn.conf.py", "main:app"]
+# Set the command to run Uvicorn directly
+# It will listen on 0.0.0.0 and use the PORT environment variable provided by Cloud Run.
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
