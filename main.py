@@ -10,6 +10,7 @@ from datetime import datetime
 
 # Import Flask for the required HTTP health check listener
 from flask import Flask
+from asgiref.wsgi import WsgiToAsgi
 
 # --- Configuration using Environment Variables (Injected by Cloud Run) ---
 DISCORD_BOT_TOKEN = os.environ.get('DISCORD_BOT_TOKEN')
@@ -323,6 +324,8 @@ async def run_photo_challenge(interaction: discord.Interaction, target_url: str)
 # --- Flask Server and Bot Integration ---
 
 app = Flask(__name__)
+# THIS IS THE NEW LINE
+app.wsgi_app = WsgiToAsgi(app.wsgi_app)
 
 # Intents required for messages, reactions, and thread content
 intents = discord.Intents.default()
@@ -440,4 +443,5 @@ async def startup():
     print("LOG: ASGI server is starting up. Creating bot task.", file=sys.stderr, flush=True)
     loop = asyncio.get_event_loop()
     bot_task = loop.create_task(run_bot_async())
+
 
