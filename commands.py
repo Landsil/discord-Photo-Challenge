@@ -23,6 +23,7 @@ def setup_commands(bot):
     )
     @app_commands.choices(operation=[
         app_commands.Choice(name="full", value="full"),
+        app_commands.Choice(name="short", value="short"),
         app_commands.Choice(name="help", value="help")
     ])
     async def photochallenge_command(interaction: discord.Interaction, operation: str):
@@ -33,8 +34,10 @@ def setup_commands(bot):
             await handle_help_command(interaction)
         elif operation == "full":
             await handle_full_analysis(interaction)
+        elif operation == "short":
+            await handle_short_analysis(interaction)
         else:
-            await interaction.followup.send("⚠️ Invalid operation. Use 'full' for analysis or 'help' for information.", ephemeral=True)
+            await interaction.followup.send("⚠️ Invalid operation. Use 'full' for complete analysis, 'short' for summary only, or 'help' for information.", ephemeral=True)
 
 async def handle_help_command(interaction: discord.Interaction):
     """Handle the help command."""
@@ -44,18 +47,33 @@ This bot analyzes Discord threads to identify image posts and count reactions (e
 
 **Available Commands:**
 • `/photochallenge help` - Displays this help message (sent via DM)
-• `/photochallenge full` - Runs full analysis on the current thread
+• `/photochallenge full` - Runs complete analysis with rankings, names, and CSV data
+• `/photochallenge short` - Runs basic analysis with summary statistics only (no names/rankings)
 
 **How it works:**
-1. Run `/photochallenge full` in the thread you want to analyze
-2. The bot will scan all messages in that thread for images
+1. Run the command in the thread you want to analyze
+2. The bot scans all messages in that thread for images
 3. It counts reactions on image posts (excluding the author's own reactions)
-4. Results are posted as a summary in the channel
-5. Full detailed report with CSV data is sent to your DMs
+4. All results are sent privately to your DMs
 
-**Output:**
-- **Channel**: Summarized ranking of top image posts
-- **Your DMs**: Detailed report with image links and downloadable CSV file
+**Command Details:**
+
+**`/photochallenge full`** (Complete Analysis):
+- Summary with total photos, votes, and unique voters
+- Top 5 rankings with participant names and links
+- Detailed breakdown with image links and reaction counts
+- Downloadable CSV file with all data
+
+**`/photochallenge short`** (Summary Only):
+- Total photos submitted
+- Total votes cast (excluding authors)
+- Number of unique voters
+- No names, rankings, or detailed data
+
+**Privacy:**
+- All results sent only to you via Direct Messages
+- Nothing posted in the channel to maintain privacy
+- Only you can see the analysis results
 
 *Note: The bot needs read access to the thread and permission to send you DMs.*
 """
@@ -134,37 +152,29 @@ async def handle_full_analysis(interaction: discord.Interaction):
         processed_data, 5, total_image_posts_count, total_thread_reactions, total_unique_reactors_count, False
     )
 
-    # 6. Check Discord character limits and send results
-    
-    # Send the short version directly to the channel (check character limit)
+    # 6. Send all results via DM only
     try:
-        if len(markdown_output_short) > 2000:
-            # Split the message if it's too long
-            parts = split_message(markdown_output_short, 2000)
-            await interaction.channel.send(parts[0])
-            for part in parts[1:]:
-                await interaction.channel.send(part)
-        else:
-            await interaction.channel.send(markdown_output_short)
-        print("LOG: Short report posted to channel.", file=sys.stderr, flush=True)
-    except Exception as e:
-        print(f"ERROR: Failed to post short report to channel {interaction.channel.id}. Details: {e}", file=sys.stderr, flush=True)
-        await interaction.followup.send(f"Error posting results to channel: {e}", ephemeral=True)
-        
-    # Send CSV file and full report to the user as a DM
-    try:
+        # Send CSV file first
         if csv_filepath:
             await interaction.user.send(
-                "📊 Here's your detailed photo challenge analysis:",
+                "📊 **Photo Challenge Analysis Complete!**\n\nHere's your detailed analysis with CSV data:",
                 file=discord.File(csv_filepath),
             )
             print("LOG: CSV file sent via DM.", file=sys.stderr, flush=True)
         else:
              await interaction.user.send(
-                "📊 Here's your detailed photo challenge analysis (CSV generation failed):",
+                "📊 **Photo Challenge Analysis Complete!**\n\nHere's your detailed analysis (CSV generation failed):",
             )
 
-        # Send full report in chunks if needed
+        # Send short summary report
+        if len(markdown_output_short) > 2000:
+            parts = split_message(markdown_output_short, 2000)
+            for part in parts:
+                await interaction.user.send(part)
+        else:
+            await interaction.user.send(markdown_output_short)
+
+        # Send full detailed report in chunks if needed
         if len(markdown_output_full) > 2000:
             parts = split_message(markdown_output_full, 2000)
             for part in parts:
@@ -172,11 +182,78 @@ async def handle_full_analysis(interaction: discord.Interaction):
         else:
             await interaction.user.send(markdown_output_full)
             
-        print("LOG: Full report sent via DM.", file=sys.stderr, flush=True)
-        await interaction.followup.send("✅ Analysis complete! Results posted to channel and detailed report sent to your DMs.", ephemeral=True)
+        print("LOG: Complete analysis sent via DM.", file=sys.stderr, flush=True)
+        await interaction.followup.send("✅ Analysis complete! All results have been sent to your DMs.", ephemeral=True)
     except Exception as e:
         print(f"ERROR: Failed to send DM to user {interaction.user.name}. Check if user allows DMs from this guild. Details: {e}", file=sys.stderr, flush=True)
-        await interaction.followup.send(f"⚠️ Could not send detailed report to your DMs. Check your privacy settings. Error: {e}", ephemeral=True)
+        await interaction.followup.send(f"⚠️ Could not send analysis results to your DMs. Check your privacy settings and ensure you allow DMs from this server. Error: {e}", ephemeral=True)
+
+async def handle_short_analysis(interaction: discord.Interaction):
+    """Handle the short analysis command - summary only without names."""
+    
+    # Check if command is run in a guild
+    if not interaction.guild:
+        print("WARNING: Command executed outside of a guild context (DM?). Ignoring.", file=sys.stderr, flush=True)
+        await interaction.followup.send("This command must be run inside a Discord server channel.", ephemeral=True)
+        return
+    
+    # Use the current thread/channel for analysis
+    thread_id = interaction.channel.id
+    print(f"LOG: Short analysis command received from {interaction.user.name} for thread ID: {thread_id}", file=sys.stderr, flush=True)
+        
+    await interaction.followup.send(f"🔍 Analyzing this thread for photo submission summary... This may take a moment.")
+
+    # 1. Fetch Data
+    all_messages = await get_thread_messages(thread_id, interaction.client) 
+    
+    if not all_messages:
+        print(f"WARNING: No messages were returned for thread {thread_id}. Terminating analysis.", file=sys.stderr, flush=True)
+        await interaction.followup.send("⚠️ Could not fetch any messages. Check thread permissions.", ephemeral=True)
+        return
+
+    # 2. Filter and Process
+    image_messages = filter_image_posts(all_messages)
+    print(f"LOG: Found {len(image_messages)} image posts to process.", file=sys.stderr, flush=True)
+    
+    if len(image_messages) == 0:
+        await interaction.followup.send("📷 No image posts found in this thread.", ephemeral=True)
+        return
+        
+    processed_data = [await get_post_data(msg) for msg in image_messages]
+    
+    # 3. Calculate Summary Metrics
+    total_image_posts_count = len(processed_data)
+    total_thread_reactions = 0
+    unique_reactors_ids = set()
+
+    for message in image_messages:
+        author_id = message.author.id
+        for reaction in message.reactions:
+            async for user in reaction.users():
+                if user.id != author_id:
+                    total_thread_reactions += 1
+                    unique_reactors_ids.add(user.id)
+    total_unique_reactors_count = len(unique_reactors_ids)
+    print(f"LOG: Short analysis complete. Total reactions: {total_thread_reactions}, Unique reactors: {total_unique_reactors_count}", file=sys.stderr, flush=True)
+
+    # 4. Generate summary-only output (no names, no rankings)
+    summary_only = f"""🏆 **Photo Challenge Summary** 🏆
+
+📊 **Statistics:**
+• Total photos submitted: `{total_image_posts_count}`
+• Total votes (excluding authors): `{total_thread_reactions}`
+• Unique voters: `{total_unique_reactors_count}`
+
+📷 Analysis complete for this thread."""
+
+    # 5. Send summary via DM
+    try:
+        await interaction.user.send(summary_only)
+        print("LOG: Summary-only analysis sent via DM.", file=sys.stderr, flush=True)
+        await interaction.followup.send("✅ Summary complete! Results sent to your DMs.", ephemeral=True)
+    except Exception as e:
+        print(f"ERROR: Failed to send DM to user {interaction.user.name}. Check if user allows DMs from this guild. Details: {e}", file=sys.stderr, flush=True)
+        await interaction.followup.send(f"⚠️ Could not send summary to your DMs. Check your privacy settings and ensure you allow DMs from this server. Error: {e}", ephemeral=True)
 
 def split_message(message: str, max_length: int = 2000):
     """Split a message into chunks that fit Discord's character limit."""
