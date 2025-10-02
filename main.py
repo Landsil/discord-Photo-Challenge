@@ -451,7 +451,28 @@ def run_bot_in_thread():
     except Exception as e:
         print(f"CRITICAL ERROR: Discord bot thread failed: {e}", file=sys.stderr, flush=True)
 
-# Start the Discord bot in a background thread when the module loads
-bot_thread = threading.Thread(target=run_bot_in_thread, daemon=True)
-bot_thread.start()
-print("LOG: Discord bot thread started.", file=sys.stderr, flush=True)
+# Global variable to store the bot thread
+bot_thread = None
+
+def start_bot_if_needed():
+    """Start the Discord bot thread if it hasn't been started yet."""
+    global bot_thread
+    if bot_thread is None or not bot_thread.is_alive():
+        print("LOG: Starting Discord bot thread...", file=sys.stderr, flush=True)
+        bot_thread = threading.Thread(target=run_bot_in_thread, daemon=True)
+        bot_thread.start()
+        print("LOG: Discord bot thread started.", file=sys.stderr, flush=True)
+
+# Add a simple test route to ensure the server is responding
+@app.route('/health', methods=['GET'])
+def simple_health():
+    """Simple health check that always returns 200."""
+    return "OK", 200
+
+# Start the bot thread immediately when the module loads
+print("LOG: Initializing Discord bot thread on module load...", file=sys.stderr, flush=True)
+start_bot_if_needed()
+
+# This is required for Gunicorn to find the Flask app
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=PORT, debug=False)
