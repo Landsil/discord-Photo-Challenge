@@ -147,7 +147,10 @@ async def handle_full_analysis(interaction: discord.Interaction):
         processed_data, 5, total_image_posts_count, total_thread_reactions, total_unique_reactors_count, False
     )
 
-    # 6. Send all results via DM only
+    # 6. Generate enhanced report with vote counts per rank
+    enhanced_report = generate_enhanced_ranking(processed_data, total_image_posts_count, total_thread_reactions, total_unique_reactors_count)
+    
+    # 7. Send results via DM only (2 messages total)
     try:
         # Send CSV file first
         if csv_filepath:
@@ -161,24 +164,16 @@ async def handle_full_analysis(interaction: discord.Interaction):
                 "📊 **Photo Challenge Analysis Complete!**\n\nHere's your detailed analysis (CSV generation failed):",
             )
 
-        # Send short summary report
-        if len(markdown_output_short) > 2000:
-            parts = split_message(markdown_output_short, 2000)
+        # Send enhanced ranking report with vote counts per rank
+        if len(enhanced_report) > 2000:
+            parts = split_message(enhanced_report, 2000)
             for part in parts:
                 await interaction.user.send(part)
         else:
-            await interaction.user.send(markdown_output_short)
+            await interaction.user.send(enhanced_report)
 
-        # Send full detailed report in chunks if needed
-        if len(markdown_output_full) > 2000:
-            parts = split_message(markdown_output_full, 2000)
-            for part in parts:
-                await interaction.user.send(part)
-        else:
-            await interaction.user.send(markdown_output_full)
-            
         print("LOG: Complete analysis sent via DM.", file=sys.stderr, flush=True)
-        await interaction.followup.send("✅ Analysis complete! All results have been sent to your DMs.", ephemeral=True)
+        await interaction.followup.send("✅ Analysis complete! Results sent to your DMs.", ephemeral=True)
     except Exception as e:
         print(f"ERROR: Failed to send DM to user {interaction.user.name}. Check if user allows DMs from this guild. Details: {e}", file=sys.stderr, flush=True)
         await interaction.followup.send(f"⚠️ Could not send analysis results to your DMs. Check your privacy settings and ensure you allow DMs from this server. Error: {e}", ephemeral=True)
@@ -249,6 +244,69 @@ async def handle_short_analysis(interaction: discord.Interaction):
     except Exception as e:
         print(f"ERROR: Failed to send DM to user {interaction.user.name}. Check if user allows DMs from this guild. Details: {e}", file=sys.stderr, flush=True)
         await interaction.followup.send(f"⚠️ Could not send summary to your DMs. Check your privacy settings and ensure you allow DMs from this server. Error: {e}", ephemeral=True)
+
+def generate_enhanced_ranking(data, total_image_posts_count, total_thread_reactions, total_unique_reactors_count):
+    """Generates enhanced ranking report with vote counts per rank, no image links."""
+    markdown = "🏆 **Photo Challenge Results** 🏆\n\n"
+    markdown += f"📊 **Summary:**\n"
+    markdown += f"• Total photos: `{total_image_posts_count}`\n"
+    markdown += f"• Total votes (excluding authors): `{total_thread_reactions}`\n"
+    markdown += f"• Unique voters: `{total_unique_reactors_count}`\n\n"
+    
+    if not data or all(d['reactions'] == 0 for d in data):
+        markdown += "📷 No posts found with external votes to display."
+        return markdown
+    
+    markdown += f"🥇 **Top {min(5, len([d for d in data if d['reactions'] > 0]))} Image Posts:**\n\n"
+
+    sorted_data = sorted(data, key=lambda x: x["reactions"], reverse=True)
+    grouped_posts = {}
+    for post in sorted_data:
+        reactions = post['reactions']
+        if reactions > 0:  # Only show posts with votes
+            if reactions not in grouped_posts:
+                grouped_posts[reactions] = []
+            grouped_posts[reactions].append(post)
+
+    if not grouped_posts:
+        markdown += "No posts found with external votes to display."
+        return markdown
+
+    sorted_groups = sorted(grouped_posts.keys(), reverse=True)
+
+    current_rank = 1
+    output_lines = []
+
+    for reactions in sorted_groups:
+        if current_rank > 5:  # Limit to top 5
+            break
+
+        posts_in_group = grouped_posts[reactions]
+        
+        # Determine rank emoji
+        rank_emoji = "🥇" if current_rank == 1 else "🥈" if current_rank == 2 else "🥉" if current_rank == 3 else f"{current_rank}️⃣"
+        
+        # Start a new rank entry with vote count
+        group_lines = []
+        group_lines.append(f"{rank_emoji} **Rank {current_rank}** (`{reactions}` votes)")
+        
+        for post in posts_in_group:
+            # Post link and author
+            group_lines.append(f"   📸 **[{post['author']}]({post['post_link']})**")
+            
+            # Include individual reaction emojis
+            reactions_str = ""
+            if post['individual_reactions']:
+                reactions_emojis = [r['emoji'] for r in post['individual_reactions']]
+                reactions_str = " " + " ".join(reactions_emojis)
+            
+            group_lines.append(f"      ⭐ {post['reactions']} votes{reactions_str}")
+
+        output_lines.extend(group_lines)
+        output_lines.append("")  # Add spacing between ranks
+        current_rank += 1
+        
+    return markdown + "\n".join(output_lines).rstrip()
 
 def split_message(message: str, max_length: int = 2000):
     """Split a message into chunks that fit Discord's character limit."""
