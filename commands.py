@@ -70,11 +70,6 @@ This bot analyzes Discord threads to identify image posts and count reactions (e
 - Number of unique voters
 - No names, rankings, or detailed data
 
-**Privacy:**
-- All results sent only to you via Direct Messages
-- Nothing posted in the channel to maintain privacy
-- Only you can see the analysis results
-
 *Note: The bot needs read access to the thread and permission to send you DMs.*
 """
     
