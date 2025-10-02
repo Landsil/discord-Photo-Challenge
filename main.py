@@ -46,7 +46,11 @@ class PhotoBot(commands.Bot):
 
     async def setup_hook(self):
         # Set up slash commands
-        setup_commands(self)
+        try:
+            setup_commands(self)
+            print("LOG: Commands setup completed.", file=sys.stderr, flush=True)
+        except Exception as e:
+            print(f"ERROR: Failed to setup commands: {e}", file=sys.stderr, flush=True)
         
         # Sync the application commands (slash commands) with Discord
         if DISCORD_CLIENT_ID:
@@ -54,6 +58,8 @@ class PhotoBot(commands.Bot):
                 # Sync commands globally
                 synced = await self.tree.sync()
                 print(f"LOG: Slash commands synced successfully. {len(synced)} commands registered.", file=sys.stderr, flush=True)
+                for cmd in synced:
+                    print(f"LOG: Registered command: {cmd.name}", file=sys.stderr, flush=True)
             except Exception as e:
                 print(f"ERROR: Failed to sync slash commands. Check bot permissions and application ID. Details: {e}", file=sys.stderr, flush=True)
 
